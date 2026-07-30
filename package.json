@@ -1,0 +1,17 @@
+{
+  "name": "visual-anagrams-batch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local web app that queues visual anagram jobs for a Colab worker via Google Drive",
+  "scripts": {
+    "dev": "concurrently -n server,client -c teal,magenta \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "start": "npm run start --prefix server",
+    "auth": "npm run auth --prefix server",
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0"
+  }
+}
