@@ -4,7 +4,19 @@ import path from 'path';
 import { Readable } from 'stream';
 import { google } from 'googleapis';
 import { config } from '../config.js';
+import {
+  getActiveTokenPath,
+  listAccounts,
+  renameAccountId,
+  updateAccountProfile,
+  upsertAccountTokens,
+} from './accounts.js';
+import { remapJobsAccountId } from '../db.js';
 import { getHuggingFaceToken, readOAuthClient } from './secrets.js';
+import {
+  remapFriendsSettingsAccount,
+  remapNotebookSettingsAccount,
+} from './settings.js';
 
 // Per-file scope: only folders/files this app creates (or the user opens with it).
 // Colab must overwrite those same files — see ensureJobResultPlaceholder().
@@ -16,10 +28,14 @@ const PLACEHOLDER_PNG = Buffer.from(
   'base64'
 );
 
+/** Real 1024×1024 results are ~1MB+; the app placeholder is ~70 bytes. */
+export const MIN_RESULT_IMAGE_BYTES = config.minResultImageBytes;
+
 let driveClient = null;
 let folderIds = {
   queue: null,
   results: null,
+  gallery: null,
 };
 
 function loadCredentials() {
@@ -44,23 +60,93 @@ export function createOAuthClient() {
   );
 }
 
-export function getAuthUrl() {
+export function getAuthUrl({ forceAccountPicker = false } = {}) {
   const oauth2Client = createOAuthClient();
+  // select_account lets the user pick a different Google identity (needed for multi-account).
+  const prompt = forceAccountPicker ? 'select_account consent' : 'consent';
   return oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
-    prompt: 'consent',
+    prompt,
   });
 }
 
+/**
+ * Exchange an OAuth code, identify the Google user, and store tokens under that account profile.
+ */
 export async function exchangeCode(code) {
   const oauth2Client = createOAuthClient();
   const { tokens } = await oauth2Client.getToken(code);
   oauth2Client.setCredentials(tokens);
-  fs.mkdirSync(path.dirname(config.tokenPath), { recursive: true });
-  fs.writeFileSync(config.tokenPath, JSON.stringify(tokens, null, 2));
   driveClient = google.drive({ version: 'v3', auth: oauth2Client });
-  return tokens;
+
+  const profile = await fetchDriveUserProfile(driveClient);
+  const accountId = profile.id;
+  const before = listAccounts();
+  // Only fold the migrated placeholder when it is the account being upgraded — never when adding a second login.
+  const foldLegacy =
+    before.accounts.some((a) => a.id === 'legacy') &&
+    (before.activeAccountId === 'legacy' ||
+      before.accounts.every((a) => a.id === 'legacy'));
+
+  const { account, isNew } = upsertAccountTokens({
+    id: accountId,
+    email: profile.email,
+    displayName: profile.displayName,
+    tokens,
+  });
+
+  if (foldLegacy && accountId !== 'legacy') {
+    renameAccountId('legacy', accountId, {
+      email: profile.email,
+      displayName: profile.displayName,
+    });
+    remapJobsAccountId('legacy', accountId);
+    remapNotebookSettingsAccount('legacy', accountId);
+    remapFriendsSettingsAccount('legacy', accountId);
+  }
+
+  return { tokens, account, isNew, profile };
+}
+
+async function fetchDriveUserProfile(drive) {
+  const about = await drive.about.get({
+    fields: 'user(displayName,emailAddress,permissionId)',
+  });
+  const user = about.data.user || {};
+  const email = user.emailAddress || null;
+  const permissionId = user.permissionId || null;
+  const id =
+    permissionId ||
+    (email ? `email:${email.toLowerCase()}` : `anon_${Date.now()}`);
+  return {
+    id,
+    email,
+    displayName: user.displayName || email || 'Google account',
+  };
+}
+
+/** Refresh email/name for the active account (e.g. after legacy migration). */
+export async function refreshActiveAccountProfile() {
+  if (!isAuthenticated()) return null;
+  const drive = await getAuthorizedClient();
+  const profile = await fetchDriveUserProfile(drive);
+  const listed = listAccounts();
+  if (listed.activeAccountId === 'legacy' && profile.id !== 'legacy') {
+    renameAccountId('legacy', profile.id, {
+      email: profile.email,
+      displayName: profile.displayName,
+    });
+    remapJobsAccountId('legacy', profile.id);
+    remapNotebookSettingsAccount('legacy', profile.id);
+    remapFriendsSettingsAccount('legacy', profile.id);
+  } else if (listed.activeAccountId) {
+    updateAccountProfile(listed.activeAccountId, {
+      email: profile.email,
+      displayName: profile.displayName,
+    });
+  }
+  return profile;
 }
 
 async function waitForAuthCode(oauth2Client) {
@@ -107,28 +193,40 @@ async function waitForAuthCode(oauth2Client) {
 
 export function resetDriveClient() {
   driveClient = null;
-  folderIds = { queue: null, results: null };
+  folderIds = { queue: null, results: null, gallery: null };
+}
+
+export function getFolderIds() {
+  return { ...folderIds };
 }
 
 export function isAuthenticated() {
-  return fs.existsSync(config.tokenPath);
+  return fs.existsSync(getActiveTokenPath()) || fs.existsSync(config.tokenPath);
 }
 
 export async function getAuthorizedClient({ allowInteractive = false } = {}) {
   if (driveClient) return driveClient;
 
   const oauth2Client = createOAuthClient();
+  const tokenPath = getActiveTokenPath();
 
-  if (fs.existsSync(config.tokenPath)) {
-    const token = JSON.parse(fs.readFileSync(config.tokenPath, 'utf8'));
+  if (fs.existsSync(tokenPath)) {
+    const token = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
     oauth2Client.setCredentials(token);
   } else if (allowInteractive) {
     const code = await waitForAuthCode(oauth2Client);
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
-    fs.mkdirSync(path.dirname(config.tokenPath), { recursive: true });
-    fs.writeFileSync(config.tokenPath, JSON.stringify(tokens, null, 2));
-    console.log(`Saved token to ${config.tokenPath}`);
+    driveClient = google.drive({ version: 'v3', auth: oauth2Client });
+    const profile = await fetchDriveUserProfile(driveClient);
+    upsertAccountTokens({
+      id: profile.id,
+      email: profile.email,
+      displayName: profile.displayName,
+      tokens,
+    });
+    console.log(`Saved token for ${profile.email || profile.id}`);
+    return driveClient;
   } else {
     throw new Error('Not signed in with Google. Visit /api/setup/auth/google to authenticate.');
   }
@@ -153,7 +251,7 @@ async function findFolderId(drive, name, parentId = null) {
   return res.data.files?.[0]?.id || null;
 }
 
-async function ensureFolder(drive, name, parentId = null) {
+export async function ensureFolder(drive, name, parentId = null) {
   const existing = await findFolderId(drive, name, parentId);
   if (existing) return existing;
 
@@ -174,6 +272,7 @@ export async function ensureDriveLayout() {
   const drive = await getAuthorizedClient();
   folderIds.queue = await ensureFolder(drive, config.driveQueueFolder);
   folderIds.results = await ensureFolder(drive, config.driveResultsFolder);
+  folderIds.gallery = await ensureFolder(drive, config.driveGalleryFolder);
 
   // Pre-create JSON files so Colab can update them under drive.file scope
   const queueFile = await findFileInFolder(drive, config.jobQueueFilename, folderIds.queue);
@@ -197,19 +296,33 @@ export async function ensureDriveLayout() {
     });
   }
 
+  const galleryManifest = await findFileInFolder(
+    drive,
+    config.galleryManifestFilename,
+    folderIds.gallery
+  );
+  if (!galleryManifest) {
+    await writeJsonFile(config.galleryManifestFilename, folderIds.gallery, {
+      version: 1,
+      owner: null,
+      updated_at: null,
+      items: [],
+    });
+  }
+
   return { ...folderIds };
 }
 
-async function findFileInFolder(drive, name, folderId) {
+export async function findFileInFolder(drive, name, folderId) {
   const res = await drive.files.list({
     q: `name='${name.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed=false`,
-    fields: 'files(id, name, modifiedTime)',
+    fields: 'files(id, name, modifiedTime, size)',
     pageSize: 1,
   });
   return res.data.files?.[0] || null;
 }
 
-async function readJsonFile(name, folderId) {
+export async function readJsonFile(name, folderId) {
   const drive = await getAuthorizedClient();
   const file = await findFileInFolder(drive, name, folderId);
   if (!file) return null;
@@ -225,7 +338,7 @@ async function readJsonFile(name, folderId) {
   };
 }
 
-async function writeJsonFile(name, folderId, data) {
+export async function writeJsonFile(name, folderId, data) {
   const drive = await getAuthorizedClient();
   const existing = await findFileInFolder(drive, name, folderId);
   const body = JSON.stringify(data, null, 2);
@@ -253,6 +366,33 @@ async function writeJsonFile(name, folderId, data) {
     fields: 'id',
   });
   return created.data.id;
+}
+
+/** Make an app-owned file readable by anyone with the link. */
+export async function setAnyoneWithLink(fileId) {
+  if (!fileId) return false;
+  const drive = await getAuthorizedClient();
+  try {
+    await drive.permissions.create({
+      fileId,
+      requestBody: {
+        type: 'anyone',
+        role: 'reader',
+      },
+    });
+    return true;
+  } catch (err) {
+    const message = String(err?.message || '');
+    // Already public, or a duplicate permission — treat as success.
+    if (
+      err?.code === 400 ||
+      /already exists/i.test(message) ||
+      /duplicate/i.test(message)
+    ) {
+      return true;
+    }
+    throw err;
+  }
 }
 
 /** Write HF token (and related secrets) for the Colab notebook to read. */
@@ -312,16 +452,22 @@ export async function ensureJobResultPlaceholder(jobId) {
 }
 
 export async function appendJobToQueue(job) {
+  const placeholder = await ensureJobResultPlaceholder(job.id);
+  const enriched = {
+    ...job,
+    result_folder_id: placeholder.folderId,
+    result_file_id: placeholder.fileId,
+  };
+
   const queue = await readJobQueue();
   const idx = queue.jobs.findIndex((j) => j.id === job.id);
   if (idx >= 0) {
-    queue.jobs[idx] = job;
+    queue.jobs[idx] = { ...queue.jobs[idx], ...enriched };
   } else {
-    queue.jobs.push(job);
+    queue.jobs.push(enriched);
   }
   await writeJobQueue(queue.jobs);
-  await ensureJobResultPlaceholder(job.id);
-  return job;
+  return enriched;
 }
 
 export async function removeJobFromQueue(jobId) {
@@ -346,16 +492,46 @@ export async function findResultImage(jobId) {
   const drive = await getAuthorizedClient();
   await ensureDriveLayout();
 
-  const jobFolder = await findFolderId(drive, jobId, folderIds.results);
-  if (!jobFolder) return null;
+  // Colab mount writes can create a second folder with the same job id; scan all.
+  const folders = await drive.files.list({
+    q: [
+      `name='${jobId.replace(/'/g, "\\'")}'`,
+      `mimeType='application/vnd.google-apps.folder'`,
+      `'${folderIds.results}' in parents`,
+      'trashed=false',
+    ].join(' and '),
+    fields: 'files(id, name)',
+    pageSize: 20,
+  });
+  let jobFolders = folders.data.files || [];
+  if (jobFolders.length === 0) {
+    const legacy = await findFolderId(drive, jobId, folderIds.results);
+    if (legacy) jobFolders = [{ id: legacy, name: jobId }];
+  }
 
-  for (const name of ['image_1024.png', 'sample_1024.png']) {
-    const file = await findFileInFolder(drive, name, jobFolder);
-    if (file) {
-      return { fileId: file.id, name, folderId: jobFolder };
+  let best = null;
+  for (const jobFolder of jobFolders) {
+    for (const name of ['image_1024.png', 'sample_1024.png', 'sample_256.png', 'image_256.png']) {
+      const file = await findFileInFolder(drive, name, jobFolder.id);
+      if (!file) continue;
+
+      const size = Number(file.size || 0);
+      // Still the app-created 1×1 placeholder — Colab hasn't flushed the real PNG yet.
+      if (size > 0 && size < MIN_RESULT_IMAGE_BYTES) {
+        continue;
+      }
+
+      const candidate = {
+        fileId: file.id,
+        name,
+        folderId: jobFolder.id,
+        size,
+        modifiedTime: file.modifiedTime || null,
+      };
+      if (!best || candidate.size > best.size) best = candidate;
     }
   }
-  return null;
+  return best;
 }
 
 export async function downloadFile(fileId, destPath) {
@@ -445,6 +621,6 @@ export function isDriveConfigured() {
 export function getDriveAuthStatus() {
   return {
     credentialsPresent: isDriveConfigured(),
-    tokenPresent: fs.existsSync(config.tokenPath),
+    tokenPresent: isAuthenticated(),
   };
 }

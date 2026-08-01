@@ -1,0 +1,49 @@
+Visual Anagrams Batch — command cheatsheet
+==========================================
+
+From the repo root:
+
+  # Install all deps (root + server + client)
+  npm run install:all
+
+  # Start app (Vite :2222 + API :3001)
+  npm run dev
+
+  # Open in browser
+  http://localhost:2222
+
+  # Server only (API on :3001)
+  npm run dev:server
+
+  # Client only (Vite on :2222)
+  npm run dev:client
+
+  # Production-style server start (no nodemon)
+  npm start
+
+  # Google Drive auth CLI (server)
+  npm run auth
+
+
+Useful curl / API checks
+------------------------
+
+  # Colab + Drive status
+  curl -s http://localhost:3001/api/jobs/status
+
+  # Force Drive sync
+  curl -s -X POST http://localhost:3001/api/jobs/sync
+
+  # List jobs
+  curl -s http://localhost:3001/api/jobs
+
+  # Create a job
+  curl -s -X POST http://localhost:3001/api/jobs \
+    -H "Content-Type: application/json" \
+    -d '{"prompt_1":"FALL","prompt_2":"snow"}'
+
+
+Ports
+-----
+  Frontend (Vite):  http://localhost:2222
+  API (Express):    http://localhost:3001

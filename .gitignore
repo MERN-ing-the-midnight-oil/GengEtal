@@ -6,6 +6,8 @@ credentials/credentials.json
 credentials/oauth-client.json
 credentials/user-secrets.json
 credentials/token.json
+credentials/google-accounts.json
+credentials/accounts/
 data/*.db
 data/*.db-*
 data/*.db-shm
@@ -13,6 +15,8 @@ data/*.db-wal
 server/.env
 cache/images/*
 !cache/images/.gitkeep
+cache/friends/*
+!cache/friends/.gitkeep
 .DS_Store
 *.log
 .vite/

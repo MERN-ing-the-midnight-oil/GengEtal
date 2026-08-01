@@ -36,10 +36,20 @@ export const config = {
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
   sqlitePath: resolvePath(process.env.SQLITE_PATH, '../data/jobs.db'),
   imageCacheDir: resolvePath(process.env.IMAGE_CACHE_DIR, '../cache/images'),
+  friendsCacheDir: resolvePath(
+    process.env.FRIENDS_CACHE_DIR,
+    '../cache/friends'
+  ),
+  /** Real 1024×1024 PNGs are ~1MB+; the app-created placeholder is ~70 bytes. */
+  minResultImageBytes: Number(process.env.MIN_RESULT_IMAGE_BYTES || 10 * 1024),
   driveQueueFolder: process.env.DRIVE_QUEUE_FOLDER || 'visual_anagrams',
   driveResultsFolder: process.env.DRIVE_RESULTS_FOLDER || 'visual_anagrams_results',
+  driveGalleryFolder:
+    process.env.DRIVE_GALLERY_FOLDER || 'visual_anagrams_gallery',
   jobQueueFilename: process.env.JOB_QUEUE_FILENAME || 'job_queue.json',
   heartbeatFilename: process.env.HEARTBEAT_FILENAME || 'colab_heartbeat.json',
+  galleryManifestFilename:
+    process.env.GALLERY_MANIFEST_FILENAME || 'gallery_manifest.json',
   colabOnlineThresholdMs: Number(process.env.COLAB_ONLINE_THRESHOLD_MS || 120000),
   syncIntervalMs: Number(process.env.SYNC_INTERVAL_MS || 15000),
   colabNotebookUrl: process.env.COLAB_NOTEBOOK_URL || '',

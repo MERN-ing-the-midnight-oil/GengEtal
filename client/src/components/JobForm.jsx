@@ -1,10 +1,21 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
-export default function JobForm({ onSubmit, disabled }) {
+export default function JobForm({ onSubmit, disabled, stagedPrompts, burn }) {
   const [prompt1, setPrompt1] = useState('');
   const [prompt2, setPrompt2] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  const estimate = burn?.estimate;
+  const burnLevel =
+    estimate?.expectedCu >= 8 ? 'is-high' : estimate?.expectedCu >= 4 ? 'is-mid' : 'is-low';
+
+  useEffect(() => {
+    if (!stagedPrompts) return;
+    setPrompt1(stagedPrompts.prompt_1 || '');
+    setPrompt2(stagedPrompts.prompt_2 || '');
+    setError('');
+  }, [stagedPrompts]);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -12,6 +23,23 @@ export default function JobForm({ onSubmit, disabled }) {
     if (!prompt1.trim() || !prompt2.trim()) {
       setError('Both prompts are required.');
       return;
+    }
+
+    // Confirm before spending on moderate/high burn settings; low-burn still shows the banner above.
+    if (estimate?.expectedCu >= 4) {
+      const ok = window.confirm(
+        [
+          `Queue this job? Estimated compute burn: ${estimate.summary}`,
+          `Typical range ${estimate.lowCu}–${estimate.highCu} CU with current settings.`,
+          estimate.warning,
+          burn?.jobsPerBudget != null
+            ? `At this rate, ~${burn.jobsPerBudget} jobs fit in a ${estimate.calibration?.budgetUnits ?? '—'} CU budget.`
+            : null,
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+      );
+      if (!ok) return;
     }
 
     setSubmitting(true);
@@ -28,6 +56,17 @@ export default function JobForm({ onSubmit, disabled }) {
 
   return (
     <form className="panel" onSubmit={handleSubmit}>
+      {estimate ? (
+        <div className={`burn-preflight ${burnLevel}`} role="status">
+          <strong>Before you queue: {estimate.summary}</strong>
+          <span>
+            Typical range {estimate.lowCu}–{estimate.highCu} CU. {estimate.warning}
+            {burn?.jobsPerBudget != null
+              ? ` About ${burn.jobsPerBudget} jobs left in a ${estimate.calibration?.budgetUnits ?? '—'} CU budget at this rate.`
+              : ''}
+          </span>
+        </div>
+      ) : null}
       <div className="form-row">
         <div className="field">
           <label htmlFor="prompt1">Prompt 1</label>

@@ -47,6 +47,19 @@ export function saveOAuthClient({ client_id, client_secret }) {
   });
 }
 
+export function switchGoogleAccount(accountId) {
+  return request('/api/setup/accounts/switch', {
+    method: 'POST',
+    body: JSON.stringify({ accountId }),
+  });
+}
+
+export function removeGoogleAccount(accountId) {
+  return request(`/api/setup/accounts/${encodeURIComponent(accountId)}`, {
+    method: 'DELETE',
+  });
+}
+
 export function createJob({ prompt_1, prompt_2 }) {
   return request('/api/jobs', {
     method: 'POST',
@@ -54,8 +67,73 @@ export function createJob({ prompt_1, prompt_2 }) {
   });
 }
 
+export function setWorkerTier(tier) {
+  return request('/api/setup/worker-tier', {
+    method: 'POST',
+    body: JSON.stringify({ tier }),
+  });
+}
+
+export function saveNotebookUrl({ url, tier, name }) {
+  return request('/api/setup/notebook-url', {
+    method: 'POST',
+    body: JSON.stringify({ url, tier, name }),
+  });
+}
+
+export function saveGenerationSettings({ resolution, num_inference_steps }) {
+  return request('/api/setup/generation-settings', {
+    method: 'POST',
+    body: JSON.stringify({ resolution, num_inference_steps }),
+  });
+}
+
+export function saveBurnCalibration(payload) {
+  return request('/api/setup/burn-calibration', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function deleteJob(id) {
   return request(`/api/jobs/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
+}
+
+export function publishJob(id) {
+  return request(`/api/jobs/${encodeURIComponent(id)}/publish`, {
+    method: 'POST',
+  });
+}
+
+export function unpublishJob(id) {
+  return request(`/api/jobs/${encodeURIComponent(id)}/publish`, {
+    method: 'DELETE',
+  });
+}
+
+export function fetchMyGalleryShare() {
+  return request('/api/friends/me');
+}
+
+export function fetchFriends() {
+  return request('/api/friends');
+}
+
+export function addFriend(galleryLink) {
+  return request('/api/friends', {
+    method: 'POST',
+    body: JSON.stringify({ galleryLink }),
+  });
+}
+
+export function removeFriend(friendId) {
+  return request(`/api/friends/${encodeURIComponent(friendId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function fetchFriendsGallery() {
+  return request('/api/friends/gallery');
 }

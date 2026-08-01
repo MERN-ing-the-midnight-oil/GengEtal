@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import HfCredentialsForm from './HfCredentialsForm.jsx';
+import { COLAB_WINDOW_NAME, openColabNotebook } from './WatchColabButton.jsx';
 
 export default function SetupScreen({
   setup,
@@ -194,7 +195,16 @@ export default function SetupScreen({
               {busy ? 'Setting up notebook…' : 'Set up Colab notebook'}
             </button>
           ) : (
-            <a className="btn" href={setup.notebook.url} target="_blank" rel="noreferrer">
+            <a
+              className="btn"
+              href={setup.notebook.url}
+              target={COLAB_WINDOW_NAME}
+              rel="noreferrer"
+              onClick={(e) => {
+                e.preventDefault();
+                openColabNotebook(setup.notebook.url);
+              }}
+            >
               Open Colab notebook →
             </a>
           )}
@@ -211,7 +221,17 @@ export default function SetupScreen({
 
         {authenticated ? (
           <p className="setup-note">
-            Signed in with Google.
+            Signed in as{' '}
+            <strong>
+              {setup?.googleAccount?.email ||
+                setup?.googleAccount?.displayName ||
+                'Google'}
+            </strong>
+            . Use this same account in Colab.
+            {' '}
+            <a className="text-link" href="/api/setup/auth/google?select_account=1">
+              Use a different Google account
+            </a>
             {notebookReady ? (
               <>
                 {' '}

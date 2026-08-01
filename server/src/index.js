@@ -4,6 +4,7 @@ import fs from 'fs';
 import { config } from './config.js';
 import jobsRouter from './routes/jobs.js';
 import setupRouter from './routes/setup.js';
+import friendsRouter from './routes/friends.js';
 import {
   getDriveAuthStatus,
   isAuthenticated,
@@ -14,6 +15,7 @@ import { getNotebookSettings } from './services/settings.js';
 import { startSyncLoop, refreshColabStatus } from './services/sync.js';
 
 fs.mkdirSync(config.imageCacheDir, { recursive: true });
+fs.mkdirSync(config.friendsCacheDir, { recursive: true });
 
 const app = express();
 app.use(cors({ origin: config.clientOrigin }));
@@ -31,6 +33,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/setup', setupRouter);
 app.use('/api/jobs', jobsRouter);
+app.use('/api/friends', friendsRouter);
 
 app.use((err, _req, res, _next) => {
   console.error(err);

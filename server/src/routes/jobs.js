@@ -8,14 +8,30 @@ import {
   getAllJobs,
   getJob,
   toPublicJob,
+  updateJob,
 } from '../db.js';
+import { getActiveAccount } from '../services/accounts.js';
 import {
   appendJobToQueue,
   isAuthenticated,
   isDriveConfigured,
   removeJobFromQueue,
 } from '../services/drive.js';
-import { getNotebookSettings } from '../services/settings.js';
+import {
+  publishJobToGallery,
+  unpublishJobFromGallery,
+} from '../services/gallery.js';
+import {
+  estimateJobBurn,
+  getBurnStatus,
+  recordDeletedJobBurn,
+} from '../services/burnEstimate.js';
+import {
+  getGenerationSettings,
+  getNotebookSettings,
+  getWorkerTier,
+  getWorkerTierInfo,
+} from '../services/settings.js';
 import { getSyncStatus, refreshColabStatus, syncOnce } from '../services/sync.js';
 import { config } from '../config.js';
 
@@ -23,6 +39,21 @@ const router = express.Router();
 
 /** How long a generating job may go without heartbeat updates before we call it stuck. */
 const COLAB_STUCK_THRESHOLD_MS = Number(process.env.COLAB_STUCK_THRESHOLD_MS || 25 * 60 * 1000);
+/** Pip install / clone can take a while — keep setup progress visible longer than the online threshold. */
+const COLAB_SETUP_FRESH_MS = Number(process.env.COLAB_SETUP_FRESH_MS || 20 * 60 * 1000);
+
+const SETUP_STEP_LABELS = {
+  drive: 'Mounting Google Drive…',
+  deps: 'Installing dependencies…',
+  hf: 'Logging in to Hugging Face…',
+  clone: 'Cloning generate.py repo…',
+  ready: 'Worker loop starting…',
+};
+
+function normalizeSetupStep(value) {
+  const step = String(value || '').toLowerCase();
+  return SETUP_STEP_LABELS[step] ? step : null;
+}
 
 function deriveWorkerPhase(colab) {
   const heartbeat = colab?.heartbeat;
@@ -31,6 +62,7 @@ function deriveWorkerPhase(colab) {
   const hbStatus = String(heartbeat?.status || '').toLowerCase();
   const currentJob = heartbeat?.current_job || null;
   const error = heartbeat?.error || colab?.error || null;
+  const setupStep = normalizeSetupStep(heartbeat?.setup_step);
 
   if (hbStatus === 'error' && ageMs != null && ageMs <= COLAB_STUCK_THRESHOLD_MS) {
     return {
@@ -38,6 +70,7 @@ function deriveWorkerPhase(colab) {
       label: 'Worker error',
       detail: error || 'The Colab poll loop reported an error.',
       currentJob,
+      setupStep,
       ageMs,
     };
   }
@@ -50,6 +83,7 @@ function deriveWorkerPhase(colab) {
         label: 'Generating in Colab',
         detail: `Working on ${currentJob}. Heartbeat pauses during generation — this can take several minutes.`,
         currentJob,
+        setupStep: setupStep || 'ready',
         ageMs,
       };
     }
@@ -58,6 +92,7 @@ function deriveWorkerPhase(colab) {
       label: 'Generating in Colab',
       detail: `Working on ${currentJob}.`,
       currentJob,
+      setupStep: setupStep || 'ready',
       ageMs,
     };
   }
@@ -68,6 +103,24 @@ function deriveWorkerPhase(colab) {
       label: 'Worker looks stuck',
       detail: `Still marked as working on ${currentJob}, but no heartbeat for ${formatAge(ageMs)}. Check the Colab tab for a hung cell or runtime disconnect.`,
       currentJob,
+      setupStep,
+      ageMs,
+    };
+  }
+
+  // Notebook cells write status=starting + setup_step before the poll loop is up.
+  if (
+    setupStep &&
+    setupStep !== 'ready' &&
+    ageMs != null &&
+    ageMs <= COLAB_SETUP_FRESH_MS
+  ) {
+    return {
+      phase: 'starting',
+      label: 'Colab is starting…',
+      detail: SETUP_STEP_LABELS[setupStep] || 'Running notebook setup…',
+      currentJob: null,
+      setupStep,
       ageMs,
     };
   }
@@ -78,6 +131,7 @@ function deriveWorkerPhase(colab) {
       label: 'Colab is online',
       detail: 'Worker heartbeat received — queue a prompt pair whenever you’re ready.',
       currentJob: null,
+      setupStep: setupStep || 'ready',
       ageMs,
     };
   }
@@ -88,15 +142,21 @@ function deriveWorkerPhase(colab) {
       label: 'Opened but not running',
       detail: `Last heartbeat ${formatAge(ageMs)} ago. Open the notebook and use Runtime → Run all, then leave the poll loop running.`,
       currentJob: null,
+      setupStep,
       ageMs,
     };
   }
 
+  const tier = getWorkerTierInfo();
+  const runtimeHint = tier.highRam
+    ? `${tier.accelerator} + High-RAM`
+    : tier.accelerator;
   return {
     phase: 'offline',
     label: 'Colab is offline',
-    detail: 'No worker heartbeat yet. Open the notebook, set A100 + High-RAM, then Runtime → Run all.',
+    detail: `No worker heartbeat yet. Open the ${tier.label} notebook, set ${runtimeHint}, then Runtime → Run all.`,
     currentJob: null,
+    setupStep: null,
     ageMs,
   };
 }
@@ -119,17 +179,25 @@ router.get('/', (req, res) => {
 router.get('/status', async (_req, res) => {
   const colab = await refreshColabStatus();
   const sync = getSyncStatus();
-  const notebook = getNotebookSettings();
+  const workerTier = getWorkerTierInfo();
+  const notebook = getNotebookSettings(workerTier.tier);
   const worker = deriveWorkerPhase(colab);
+  const fallbackUrl =
+    workerTier.tier === 'pro'
+      ? config.colabNotebookUrl || config.templateNotebookUrl
+      : null;
   res.json({
     colabOnline: Boolean(colab?.online),
     colab,
     worker,
-    notebookUrl:
-      notebook.url || config.colabNotebookUrl || config.templateNotebookUrl,
+    workerTier,
+    notebookUrl: notebook.url || fallbackUrl,
     notebook,
+    generation: getGenerationSettings(),
+    burn: getBurnStatus(),
     authenticated: isAuthenticated(),
     driveConfigured: isDriveConfigured(),
+    googleAccount: getActiveAccount(),
     lastSyncAt: sync.lastSyncAt,
     lastSyncError: sync.lastSyncError,
   });
@@ -150,10 +218,60 @@ router.get('/:id', (req, res) => {
   res.json({ job: toPublicJob(job) });
 });
 
+router.post('/:id/publish', async (req, res) => {
+  try {
+    if (!isDriveConfigured() || !isAuthenticated()) {
+      return res.status(401).json({ error: 'Sign in with Google first' });
+    }
+    const job = getJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    const result = await publishJobToGallery(job);
+    const updated = updateJob(job.id, {
+      published: 1,
+      gallery_file_id: result.fileId,
+      updated_at: new Date().toISOString(),
+    });
+    res.json({ job: toPublicJob(updated), share: result.share });
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.delete('/:id/publish', async (req, res) => {
+  try {
+    if (!isDriveConfigured() || !isAuthenticated()) {
+      return res.status(401).json({ error: 'Sign in with Google first' });
+    }
+    const job = getJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    const result = await unpublishJobFromGallery(job.id);
+    const updated = updateJob(job.id, {
+      published: 0,
+      gallery_file_id: null,
+      updated_at: new Date().toISOString(),
+    });
+    res.json({ job: toPublicJob(updated), share: result.share });
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.get('/:id/image', (req, res) => {
   const job = getJob(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   if (!job.local_image_path || !fs.existsSync(job.local_image_path)) {
+    return res.status(404).json({ error: 'Image not available yet' });
+  }
+  // Reject the 1×1 Drive placeholder if it was cached before Colab flushed.
+  try {
+    if (fs.statSync(job.local_image_path).size < config.minResultImageBytes) {
+      return res.status(404).json({ error: 'Image not available yet' });
+    }
+  } catch {
     return res.status(404).json({ error: 'Image not available yet' });
   }
   res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -165,6 +283,9 @@ router.delete('/:id', async (req, res) => {
     const job = getJob(req.params.id);
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
+    // Count GPU-consuming deletes toward burn calibration before removing the row.
+    recordDeletedJobBurn(job);
+
     // Remove from Drive first so the sync loop cannot upsert the job back.
     if (isDriveConfigured()) {
       try {
@@ -174,6 +295,13 @@ router.delete('/:id', async (req, res) => {
         return res.status(502).json({
           error: `Could not remove job from Drive queue: ${err.message}`,
         });
+      }
+      if (job.published) {
+        try {
+          await unpublishJobFromGallery(job.id);
+        } catch (err) {
+          console.warn('Failed to unpublish deleted job:', err.message);
+        }
       }
     }
 
@@ -219,6 +347,12 @@ router.post('/', async (req, res) => {
 
     if (isDriveConfigured()) {
       try {
+        const generation = getGenerationSettings();
+        const burn = estimateJobBurn({
+          tier: getWorkerTier(),
+          resolution: generation.resolution,
+          num_inference_steps: generation.num_inference_steps,
+        });
         await appendJobToQueue({
           id: job.id,
           prompt_1: job.prompt_1,
@@ -229,17 +363,23 @@ router.post('/', async (req, res) => {
           completed_at: null,
           error_message: null,
           seed,
+          tier: getWorkerTier(),
+          resolution: generation.resolution,
+          num_inference_steps: generation.num_inference_steps,
+          generate_1024: generation.generate_1024,
+          estimated_cu: burn.expectedCu,
         });
       } catch (err) {
         console.error('Failed to write job to Drive:', err);
         return res.status(201).json({
           job: toPublicJob(job),
+          burn: getBurnStatus(),
           warning: `Job saved locally but Drive sync failed: ${err.message}`,
         });
       }
     }
 
-    res.status(201).json({ job: toPublicJob(job) });
+    res.status(201).json({ job: toPublicJob(job), burn: getBurnStatus() });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
